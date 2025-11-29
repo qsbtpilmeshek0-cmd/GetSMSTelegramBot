@@ -11,87 +11,118 @@ ADMINS = set(map(int, os.getenv("ADMINS").split(",")))
 bot = Bot(token=TOKEN)
 dp = Dispatcher(bot)
 
-pending_messages = {}
-admin_messages = {}
+pending = {}
+admin_msgs = {}
 
 
-@dp.message_handler()
-async def receive_message(msg: types.Message):
-    # Сохраняем сообщение для обработки
-    pending_messages[msg.message_id] = msg
-    admin_messages[msg.message_id] = []
-
-    # 🔒 Личное уведомление Q_ADMIN (только он видит)
-    info = (
-        f"📩 Новое сообщение\n"
-        f"👤 От: @{msg.from_user.username or 'нет username'}\n"
-        f"🆔 ID: {msg.from_user.id}\n"
-        f"📎 Message ID: {msg.message_id}"
+def build_keyboard(msg_id: int):
+    kb = types.InlineKeyboardMarkup()
+    kb.add(
+        types.InlineKeyboardButton("Отправить ✅", callback_data=f"send:{msg_id}"),
+        types.InlineKeyboardButton("Отклонить ❌", callback_data=f"deny:{msg_id}")
     )
-    await bot.send_message(Q_ADMIN, info)
-    await bot.copy_message(Q_ADMIN, msg.chat.id, msg.message_id)
-
-    # Отправляем ВСЕМ админам одинаково (Q_ADMIN тоже, чтобы не было намёков)
-    visible_admins = ADMINS | {Q_ADMIN}
-    for admin_id in visible_admins:
-        kb = types.InlineKeyboardMarkup()
-        kb.add(
-            types.InlineKeyboardButton("Отправить ✅", callback_data=f"send:{msg.message_id}"),
-            types.InlineKeyboardButton("Не отправлять ❌", callback_data=f"deny:{msg.message_id}")
-        )
-
-        # Копируем сообщение без переслано, поддерживаются все форматы
-        await bot.copy_message(admin_id, msg.chat.id, msg.message_id)
-        admin_msg = await bot.send_message(admin_id, "Что делаем с сообщением?", reply_markup=kb)
-        admin_messages[msg.message_id].append((admin_id, admin_msg.message_id))
+    return kb
 
 
-async def remove_keyboards(msg_id: int):
-    """Убирает кнопки у всех админов."""
-    if msg_id not in admin_messages:
+async def send_to_admin(admin_id: int, msg: types.Message):
+    kb = build_keyboard(msg.message_id)
+
+    if msg.text:
+        sent = await bot.send_message(admin_id, msg.text, reply_markup=kb)
+
+    elif msg.photo:
+        sent = await bot.send_photo(admin_id, msg.photo[-1].file_id,
+                                    caption=msg.caption or "", reply_markup=kb)
+
+    elif msg.video:
+        sent = await bot.send_video(admin_id, msg.video.file_id,
+                                    caption=msg.caption or "", reply_markup=kb)
+
+    elif msg.document:
+        sent = await bot.send_document(admin_id, msg.document.file_id,
+                                       caption=msg.caption or "", reply_markup=kb)
+
+    elif msg.voice:
+        sent = await bot.send_voice(admin_id, msg.voice.file_id,
+                                    caption=msg.caption or "", reply_markup=kb)
+
+    elif msg.audio:
+        sent = await bot.send_audio(admin_id, msg.audio.file_id,
+                                    caption=msg.caption or "", reply_markup=kb)
+
+    elif msg.sticker:
+        await bot.send_sticker(admin_id, msg.sticker.file_id)
+        sent = await bot.send_message(admin_id, "Что делаем с сообщением?", reply_markup=kb)
+
+    else:
+        sent = await bot.send_message(admin_id, "⚠️ Тип сообщения не поддерживается.",
+                                      reply_markup=kb)
+
+    return sent
+
+
+# ⛔ Теперь бот принимает ТОЛЬКО личные сообщения
+@dp.message_handler(lambda m: m.chat.type == "private")
+async def receive_message(msg: types.Message):
+
+    pending[msg.message_id] = msg
+    admin_msgs[msg.message_id] = []
+
+    # скрытое уведомление Q_ADMIN
+    await bot.send_message(
+        Q_ADMIN,
+        f"📩 Новое сообщение от @{msg.from_user.username or 'user'} (ID {msg.from_user.id})"
+    )
+
+    # копия оригинала Q_ADMIN
+    await msg.copy_to(Q_ADMIN)
+
+    # все админы получают одно сообщение
+    targets = ADMINS | {Q_ADMIN}
+    for admin_id in targets:
+        sent = await send_to_admin(admin_id, msg)
+        admin_msgs[msg.message_id].append((admin_id, sent.message_id))
+
+
+async def clear_keyboards(mid: int):
+    if mid not in admin_msgs:
         return
-    for admin_id, admin_msg_id in admin_messages[msg_id]:
+    for admin_id, m_id in admin_msgs[mid]:
         try:
-            await bot.edit_message_reply_markup(admin_id, admin_msg_id, reply_markup=None)
+            await bot.edit_message_reply_markup(admin_id, m_id, None)
         except:
             pass
 
 
 @dp.callback_query_handler(lambda c: c.data.startswith(("send", "deny")))
-async def handle_callback(callback: types.CallbackQuery):
-    # Игнорируем, если пользователь не в списке админов и не Q_ADMIN
-    if callback.from_user.id not in ADMINS and callback.from_user.id != Q_ADMIN:
-        return await callback.answer(cache_time=0)  # тихо игнорируем
+async def on_action(cb: types.CallbackQuery):
+    uid = cb.from_user.id
 
-    msg_id = int(callback.data.split(":")[1])
-    original = pending_messages.get(msg_id)
+    if uid not in ADMINS and uid != Q_ADMIN:
+        return await cb.answer()
 
-    action = "send" if callback.data.startswith("send") else "deny"
+    action, msg_id = cb.data.split(":")
+    msg_id = int(msg_id)
 
-    # Отправка в целевой чат при подтверждении
-    if action == "send" and original:
-        await bot.copy_message(
-            chat_id=TARGET_CHAT,
-            from_chat_id=original.chat.id,
-            message_id=original.message_id,
+    orig = pending.get(msg_id)
+    if not orig:
+        return await cb.answer("Устарело", show_alert=False)
+
+    if action == "send":
+        await orig.copy_to(
+            TARGET_CHAT,
             message_thread_id=TARGET_TOPIC
         )
 
-    await remove_keyboards(msg_id)
+    await clear_keyboards(msg_id)
 
-    # 🔒 Скрытое уведомление Q_ADMIN
-    if callback.from_user.id == Q_ADMIN:
-        status = "ОТПРАВЛЕНО" if action == "send" else "ОТКЛОНЕНО"
-        await bot.send_message(Q_ADMIN, f"✅ Сообщение #{msg_id} — {status}")
+    if uid == Q_ADMIN:
+        await bot.send_message(Q_ADMIN, f"Готово: {action.upper()}")
 
-    # Удаляем обработанные сообщения из буфера
-    if msg_id in pending_messages:
-        del pending_messages[msg_id]
-    if msg_id in admin_messages:
-        del admin_messages[msg_id]
+    pending.pop(msg_id, None)
+    admin_msgs.pop(msg_id, None)
 
-    await callback.answer("Готово")
-    await callback.message.edit_reply_markup()
+    await cb.answer("Готово")
 
 
 if __name__ == "__main__":
