@@ -71,7 +71,7 @@ def load_all():
 
 load_all()
 LOCK = asyncio.Lock()
-SPAM_TIMEOUT = 30  # секунд
+SPAM_TIMEOUT = 90  # секунд
 
 def build_keyboard(rid: str) -> InlineKeyboardMarkup:
     kb = InlineKeyboardMarkup()
