@@ -1,4 +1,5 @@
 # DarknetBot.py
+
 import os
 import json
 import uuid
@@ -7,7 +8,7 @@ import asyncio
 from typing import Dict, List, Tuple
 from aiogram import Bot, Dispatcher, types
 from aiogram.utils import executor
-from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
+from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton, ContentType
 
 TOKEN = os.getenv("BOT_TOKEN")
 Q_ADMIN = int(os.getenv("Q_ADMIN"))
@@ -86,6 +87,7 @@ async def send_admin_panel(admin_id: int, orig: types.Message, rid: str):
         copied = await orig.copy_to(admin_id)
     except Exception:
         return None, None
+
     try:
         kb = build_keyboard(rid)
         buttons_msg = await bot.send_message(admin_id, "Что делаем с сообщением?", reply_markup=kb)
@@ -103,10 +105,14 @@ async def clear_keyboards(rid: str):
     admin_msgs.pop(rid, None)
     persist_all()
 
-@dp.message_handler(lambda m: m.chat.type == "private")
+# ----------------------------------------------------------------------
+# ✔️ ИСПРАВЛЕННЫЙ ХЕНДЛЕР — ЛОВИТ ВСЕ ТИПЫ МЕДИА
+# ----------------------------------------------------------------------
+@dp.message_handler(lambda m: m.chat.type == "private", content_types=ContentType.ANY)
 async def handle_private(msg: types.Message):
     user_id = msg.from_user.id
     now = time.time()
+
     # антиспам
     if user_id in last_msg_time and now - last_msg_time[user_id] < SPAM_TIMEOUT:
         remaining = int(SPAM_TIMEOUT - (now - last_msg_time[user_id]))
@@ -117,9 +123,9 @@ async def handle_private(msg: types.Message):
 
     rid = uuid.uuid4().hex
     pending[rid] = {
-        "chat_id": int(msg.chat.id),
-        "msg_id": int(msg.message_id),
-        "from_user_id": int(user_id),
+        "chat_id": msg.chat.id,
+        "msg_id": msg.message_id,
+        "from_user_id": user_id,
         "from_username": msg.from_user.username or "",
         "ts": now
     }
@@ -135,10 +141,7 @@ async def handle_private(msg: types.Message):
             f"RID: {rid}"
         )
         await bot.send_message(Q_ADMIN, log_text)
-        try:
-            await msg.copy_to(Q_ADMIN)
-        except Exception:
-            pass
+        await msg.copy_to(Q_ADMIN)
     except Exception:
         pass
 
@@ -152,14 +155,12 @@ async def handle_private(msg: types.Message):
                 admin_msgs[rid].append((admin_id, buttons_id))
         persist_all()
 
+
 @dp.callback_query_handler(lambda c: c.data and (c.data.startswith("send:") or c.data.startswith("deny:")))
 async def handle_moderation(cb: types.CallbackQuery):
     uid = cb.from_user.id
     if uid not in ADMINS and uid != Q_ADMIN:
-        try:
-            await cb.answer(cache_time=0)
-        except Exception:
-            pass
+        await cb.answer(cache_time=0)
         return
 
     try:
@@ -170,10 +171,7 @@ async def handle_moderation(cb: types.CallbackQuery):
 
     async with LOCK:
         if rid in processed:
-            try:
-                await cb.answer("Уже обработано")
-            except Exception:
-                pass
+            await cb.answer("Уже обработано")
             try:
                 await cb.message.edit_reply_markup(reply_markup=None)
             except Exception:
@@ -182,10 +180,7 @@ async def handle_moderation(cb: types.CallbackQuery):
 
         info = pending.get(rid)
         if not info:
-            try:
-                await cb.answer("Устарело")
-            except Exception:
-                pass
+            await cb.answer("Устарело")
             try:
                 await cb.message.edit_reply_markup(reply_markup=None)
             except Exception:
@@ -198,12 +193,16 @@ async def handle_moderation(cb: types.CallbackQuery):
         if action == "send":
             try:
                 if TARGET_TOPIC:
-                    await bot.copy_message(TARGET_CHAT, info["chat_id"], info["msg_id"], message_thread_id=TARGET_TOPIC)
+                    await bot.copy_message(
+                        TARGET_CHAT, info["chat_id"], info["msg_id"], message_thread_id=TARGET_TOPIC
+                    )
                 else:
-                    await bot.copy_message(TARGET_CHAT, info["chat_id"], info["msg_id"])
+                    await bot.copy_message(
+                        TARGET_CHAT, info["chat_id"], info["msg_id"]
+                    )
             except Exception:
                 pass
-        else:  # deny
+        else:
             try:
                 await bot.send_message(info["from_user_id"], "Сообщение посчитали непригодным для Darknet❌")
             except Exception:
@@ -211,7 +210,7 @@ async def handle_moderation(cb: types.CallbackQuery):
 
         await clear_keyboards(rid)
 
-        # лог только для Q_ADMIN
+        # лог
         try:
             if uid == Q_ADMIN:
                 await bot.send_message(Q_ADMIN, f"📌 RID {rid} — выполнено: {action.upper()}")
@@ -224,10 +223,7 @@ async def handle_moderation(cb: types.CallbackQuery):
         admin_msgs.pop(rid, None)
         persist_all()
 
-        try:
-            await cb.answer("Готово")
-        except Exception:
-            pass
+        await cb.answer("Готово")
         try:
             await cb.message.edit_reply_markup(reply_markup=None)
         except Exception:
