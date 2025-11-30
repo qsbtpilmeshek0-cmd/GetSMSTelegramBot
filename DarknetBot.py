@@ -185,13 +185,47 @@ async def clear_keyboards(rid: str):
     persist_all()
 
 # ----------------------------------------------------------------------
-# ✔️ ХЕНДЛЕР ВСЕХ ТИПОВ СООБЩЕНИЙ + БЕЗОПАСНОЕ ЛОГИРОВАНИЕ
+# ✔️ ХЕНДЛЕР ДЛЯ КОМАНД Q_ADMIN
+# ----------------------------------------------------------------------
+@dp.message_handler(lambda m: m.from_user.id == Q_ADMIN, commands=["getlog", "start"])
+async def handle_qadmin_commands(msg: types.Message):
+    if msg.text.startswith("/getlog"):
+        files = os.listdir(LOG_DIR)
+        if not files:
+            await msg.reply("Логи пустые.")
+            return
+
+        await msg.reply(f"Создаю архив с {len(files)} файлами...")
+
+        zip_path = os.path.join(LOG_DIR, "logs_archive.zip")
+        try:
+            with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_DEFLATED) as zipf:
+                for filename in files:
+                    file_path = os.path.join(LOG_DIR, filename)
+                    zipf.write(file_path, arcname=filename)
+        except Exception as e:
+            await msg.reply(f"Не удалось создать архив: {e}")
+            return
+
+        try:
+            await msg.answer_document(InputFile(zip_path))
+        except Exception as e:
+            await msg.reply(f"Не удалось отправить архив: {e}")
+        finally:
+            if os.path.exists(zip_path):
+                os.remove(zip_path)
+
+    elif msg.text.startswith("/start"):
+        await msg.reply("Бот активен. Логи собираются, модерация включена.")
+
+# ----------------------------------------------------------------------
+# ✔️ ХЕНДЛЕР ВСЕХ ТИПОВ СООБЩЕНИЙ (кроме команд)
 # ----------------------------------------------------------------------
 @dp.message_handler(lambda m: m.chat.type == "private", content_types=ContentType.ANY)
 async def handle_private(msg: types.Message):
 
-    # ✅ Исключаем команды Q_ADMIN (/getlog, /start и др.) из модерации
-    if msg.text and msg.from_user.id == Q_ADMIN and msg.text.startswith("/"):
+    # пропускаем любые команды
+    if msg.text and msg.text.startswith("/"):
         return
 
     # безопасное логирование
@@ -200,7 +234,6 @@ async def handle_private(msg: types.Message):
     user_id = msg.from_user.id
     now = time.time()
 
-    # антиспам
     if user_id in last_msg_time and now - last_msg_time[user_id] < SPAM_TIMEOUT:
         remaining = int(SPAM_TIMEOUT - (now - last_msg_time[user_id]))
         return await msg.reply(f"⏳ Писать можно раз в {SPAM_TIMEOUT} секунд. Попробуйте через {remaining} сек.")
@@ -229,7 +262,9 @@ async def handle_private(msg: types.Message):
                 admin_msgs[rid].append((admin_id, buttons_id))
         persist_all()
 
-
+# ----------------------------------------------------------------------
+# ✔️ ХЕНДЛЕР МОДЕРАЦИИ
+# ----------------------------------------------------------------------
 @dp.callback_query_handler(lambda c: c.data and (c.data.startswith("send:") or c.data.startswith("deny:")))
 async def handle_moderation(cb: types.CallbackQuery):
     uid = cb.from_user.id
@@ -283,50 +318,6 @@ async def handle_moderation(cb: types.CallbackQuery):
         except: pass
 
 # ----------------------------------------------------------------------
-# ✔️ КОМАНДА /getlog — формируем ZIP и отправляем Q_ADMIN
-# ----------------------------------------------------------------------
-@dp.message_handler(commands=["getlog"])
-async def cmd_getlog(msg: types.Message):
-    if msg.from_user.id != Q_ADMIN:
-        return
-
-    files = os.listdir(LOG_DIR)
-    if not files:
-        await msg.reply("Логи пустые.")
-        return
-
-    await msg.reply(f"Создаю архив с {len(files)} файлами...")
-
-    zip_path = os.path.join(LOG_DIR, "logs_archive.zip")
-
-    try:
-        with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_DEFLATED) as zipf:
-            for filename in files:
-                file_path = os.path.join(LOG_DIR, filename)
-                zipf.write(file_path, arcname=filename)
-    except Exception as e:
-        await msg.reply(f"Не удалось создать архив: {e}")
-        return
-
-    try:
-        await msg.answer_document(InputFile(zip_path))
-    except Exception as e:
-        await msg.reply(f"Не удалось отправить архив: {e}")
-        return
-    finally:
-        if os.path.exists(zip_path):
-            os.remove(zip_path)
-
-# ----------------------------------------------------------------------
-# ✔️ КОМАНДА /start
-# ----------------------------------------------------------------------
-@dp.message_handler(commands=["start"])
-async def cmd_start(msg: types.Message):
-    if msg.from_user.id != Q_ADMIN:
-        return
-    await msg.reply("Бот активен. Логи собираются, модерация включена.")
-
-# ----------------------------------------------------------------------
 # 🔹 Запуск бота
 # ----------------------------------------------------------------------
 if __name__ == "__main__":
@@ -334,4 +325,4 @@ if __name__ == "__main__":
         executor.start_polling(dp, skip_updates=True)
     finally:
         persist_all()
-                                 
+            
